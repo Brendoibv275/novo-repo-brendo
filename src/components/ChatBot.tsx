@@ -5,7 +5,7 @@ import SmartToyIcon from '@mui/icons-material/SmartToy';
 import CloseIcon from '@mui/icons-material/Close';
 import { useTheme } from '@mui/material/styles';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, addDoc } from 'firebase/firestore';
+import { getFirestore, collection, addDoc, Firestore } from 'firebase/firestore';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 
@@ -41,7 +41,7 @@ const firebaseConfig = {
 
 // Inicializa Firebase apenas se as credenciais estiverem disponíveis
 let app;
-let db;
+let db: Firestore | undefined;
 try {
   app = initializeApp(firebaseConfig);
   db = getFirestore(app);
