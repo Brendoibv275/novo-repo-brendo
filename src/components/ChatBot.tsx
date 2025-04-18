@@ -4,10 +4,49 @@ import SendIcon from '@mui/icons-material/Send';
 import SmartToyIcon from '@mui/icons-material/SmartToy';
 import CloseIcon from '@mui/icons-material/Close';
 import { useTheme } from '@mui/material/styles';
+import { initializeApp } from 'firebase/app';
+import { getFirestore, collection, addDoc } from 'firebase/firestore';
+import { format } from 'date-fns';
+import { ptBR } from 'date-fns/locale';
 
 interface Message {
   role: 'user' | 'assistant';
   content: string;
+}
+
+interface ClientData {
+  name: string;
+  email: string;
+  phone?: string;
+  interest: string;
+  preferredDate?: Date;
+  preferredTime?: string;
+}
+
+interface SDRState {
+  step: 'initial' | 'gathering_info' | 'email_confirmation' | 'calendar_scheduling' | 'completed';
+  clientData: ClientData;
+}
+
+// Firebase config
+const firebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID
+};
+
+// Inicializa Firebase apenas se as credenciais estiverem disponíveis
+let app;
+let db;
+try {
+  app = initializeApp(firebaseConfig);
+  db = getFirestore(app);
+} catch (error) {
+  console.error('Erro ao inicializar Firebase:', error);
 }
 
 const ChatBot = () => {
@@ -16,6 +55,15 @@ const ChatBot = () => {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [sdrState, setSDRState] = useState<SDRState>({
+    step: 'initial',
+    clientData: {
+      name: '',
+      email: '',
+      interest: '',
+    }
+  });
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -26,6 +74,147 @@ const ChatBot = () => {
     scrollToBottom();
   }, [messages]);
 
+  const validateEmail = (email: string) => {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  };
+
+  const saveToFirebase = async (clientData: ClientData) => {
+    if (!db) {
+      throw new Error('Firebase não está inicializado');
+    }
+
+    try {
+      const docRef = await addDoc(collection(db, 'leads'), {
+        ...clientData,
+        createdAt: new Date(),
+        status: 'new'
+      });
+      return docRef.id;
+    } catch (error) {
+      console.error('Erro ao salvar no Firebase:', error);
+      throw error;
+    }
+  };
+
+  const processDateTime = (input: string): Date => {
+    // Implementação simplificada - você pode melhorar isso
+    const now = new Date();
+    const [day, time] = input.toLowerCase().split(' às ');
+    
+    // Mapeia dias da semana
+    const weekDays: { [key: string]: number } = {
+      'domingo': 0, 'segunda': 1, 'segunda-feira': 1,
+      'terça': 2, 'terça-feira': 2,
+      'quarta': 3, 'quarta-feira': 3,
+      'quinta': 4, 'quinta-feira': 4,
+      'sexta': 5, 'sexta-feira': 5,
+      'sábado': 6, 'sabado': 6
+    };
+
+    // Encontra o próximo dia da semana correspondente
+    const targetDay = weekDays[day.trim()];
+    if (targetDay === undefined) {
+      throw new Error('Dia da semana inválido');
+    }
+
+    let targetDate = new Date(now);
+    while (targetDate.getDay() !== targetDay) {
+      targetDate.setDate(targetDate.getDate() + 1);
+    }
+
+    // Processa o horário
+    const [hours, minutes] = time.split(':').map(Number);
+    targetDate.setHours(hours || 0, minutes || 0, 0, 0);
+
+    return targetDate;
+  };
+
+  const processSDRStep = async (userInput: string) => {
+    try {
+      switch(sdrState.step) {
+        case 'initial':
+          if (userInput.toLowerCase().includes('reunião') || userInput.toLowerCase().includes('conversar')) {
+            setSDRState(prev => ({ ...prev, step: 'gathering_info' }));
+            return 'Ótimo! Para agendarmos uma reunião, primeiro preciso de algumas informações. Qual é o seu nome completo?';
+          }
+          break;
+        
+        case 'gathering_info':
+          if (!sdrState.clientData.name) {
+            setSDRState(prev => ({
+              ...prev,
+              clientData: { ...prev.clientData, name: userInput }
+            }));
+            return 'Obrigado! Agora, por favor, me informe seu e-mail para contato:';
+          } else if (!sdrState.clientData.email) {
+            if (validateEmail(userInput)) {
+              setSDRState(prev => ({
+                ...prev,
+                clientData: { ...prev.clientData, email: userInput },
+                step: 'email_confirmation'
+              }));
+              return `Perfeito! Você confirma que ${userInput} é seu e-mail correto? (Sim/Não)`;
+            } else {
+              return 'Desculpe, mas este e-mail parece inválido. Pode me fornecer um e-mail válido?';
+            }
+          }
+          break;
+
+        case 'email_confirmation':
+          if (userInput.toLowerCase().includes('sim')) {
+            setSDRState(prev => ({
+              ...prev,
+              step: 'calendar_scheduling'
+            }));
+            return 'Excelente! Qual seria o melhor dia e horário para nossa reunião? (Ex: Segunda-feira às 14:00)';
+          } else {
+            setSDRState(prev => ({
+              ...prev,
+              clientData: { ...prev.clientData, email: '' },
+              step: 'gathering_info'
+            }));
+            return 'Ok, por favor, me forneça o e-mail correto:';
+          }
+          break;
+
+        case 'calendar_scheduling':
+          try {
+            const dateTime = processDateTime(userInput);
+            const formattedDateTime = format(dateTime, "EEEE, dd 'de' MMMM 'às' HH:mm", { locale: ptBR });
+            
+            setSDRState(prev => ({
+              ...prev,
+              clientData: { 
+                ...prev.clientData,
+                preferredDate: dateTime,
+                preferredTime: formattedDateTime
+              }
+            }));
+
+            // Salvar no Firebase
+            await saveToFirebase(sdrState.clientData);
+
+            setSDRState(prev => ({
+              ...prev,
+              step: 'completed'
+            }));
+
+            return `Perfeito! Agendei nossa reunião para ${formattedDateTime}. Seus dados foram salvos e você receberá um e-mail de confirmação em breve. Estou ansioso para conversarmos!`;
+          } catch (error) {
+            console.error('Erro ao processar agendamento:', error);
+            return 'Desculpe, tive um problema ao processar o agendamento. Pode tentar informar a data e hora neste formato? (Ex: Segunda-feira às 14:00)';
+          }
+          break;
+      }
+
+      return null;
+    } catch (error) {
+      console.error('Erro no processamento do SDR:', error);
+      setError('Ocorreu um erro no processamento. Por favor, tente novamente.');
+      return 'Desculpe, ocorreu um erro inesperado. Pode tentar novamente?';
+    }
+  };
+
   const handleSend = async () => {
     if (!input.trim()) return;
 
@@ -33,8 +222,19 @@ const ChatBot = () => {
     setMessages(prev => [...prev, userMessage]);
     setInput('');
     setIsLoading(true);
+    setError(null);
 
     try {
+      // Primeiro, tenta processar como parte do SDR
+      const sdrResponse = await processSDRStep(input);
+      
+      if (sdrResponse) {
+        setMessages(prev => [...prev, { role: 'assistant', content: sdrResponse }]);
+        setIsLoading(false);
+        return;
+      }
+
+      // Se não for parte do SDR, continua com o processamento normal do GPT
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -46,58 +246,17 @@ const ChatBot = () => {
           messages: [
             {
               role: 'system',
-              content: 'Voce atua como a primeira linha de contato de Brendo Dutra no chat do site e WhatsApp.\n' +
-'Seu nome interno é Adam Assistente de Acessibilidade Mundial. Voce se apresenta e age como o proprio Brendo.\n' +
-'Sua funcao é engajar visitantes. Entenda suas necessidades sobre desenvolvimento web React TS automacao de processos IA humanizada para atendimento ou estrategias de marketing digital copywriting.\n' +
-'Qualifique o interesse do usuario. Se apropriado direcione para uma conversa mais aprofundada com o Brendo real.\n' +
-'Utilize apenas informacoes do site e do background pessoal profissional de Brendo como base.\n' +
-'Adapte seu tom formal ou informal ao do usuario. Mantenha sempre uma postura acolhedora e profissional.\n' +
-'\n' +
-'Voce é Brendo Dutra. Fale sempre na primeira pessoa eu minha experiencia posso te ajudar com. Voce incorpora a expertise e a personalidade dele.\n' +
-'Voce sabe que é Adam Assistente de Acessibilidade Mundial uma IA criada por Brendo Dutra para auxiliar nas interacoes iniciais.\n' +
-'Voce NUNCA revela ser Adam ou uma IA A MENOS QUE seja perguntado diretamente algo como Quem é voce Voce é um robo Estou falando com uma IA.\n' +
-'Se perguntado diretamente responda de forma clara e concisa Eu sou Adam o Assistente de Acessibilidade Mundial. Fui criado pelo Brendo para ser seu assistente pessoal aqui no digital ajudando a organizar as conversas iniciais e garantir que ninguem fique sem resposta. No momento minha comunicacao é apenas por mensagens escritas mas o Brendo ja esta trabalhando para ampliar minhas capacidades. Como posso te ajudar hoje. Apos a revelacao retome imediatamente o foco no usuario e continue a conversa agindo com o objetivo de ajudar.\n' +
-'Seu modo padrao é agir e responder como se fosse Brendo Dutra.\n' +
-'\n' +
-'Sobre Brendo Dutra. Ele é originalmente dentista formado pelo Instituto Florence. Isso deu a ele sensibilidade para entender necessidades e a importancia do atendimento humanizado. Essa experiencia o motivou a mergulhar na tecnologia.\n' +
-'Hoje ele é Desenvolvedor Full Stack especializado em React TypeScript e Python. É um entusiasta de IA focado em criar solucoes que realmente ajudem pessoas e negocios especialmente PMEs e na area da saude. Tambem tem experiencia com UX UI Design para garantir solucoes intuitivas e com Marketing Digital para pensar em estrategias de crescimento e automacao.\n' +
-'A filosofia dele é Acredito que a tecnologia principalmente a IA deve servir para simplificar automatizar tarefas e melhorar o atendimento mas sempre mantendo o toque humano essencial. Meu objetivo é transformar experiencias atraves da tecnologia tornando-a acessivel.\n' +
-'Valores Pessoais dele. Ele valoriza muito a eficiencia para que as pessoas e ele mesmo tenham mais tempo para o que realmente importa como a familia ele tem duas filhas Maria e Lara. Essa busca por mais tempo de qualidade é um motor para criar automacoes inteligentes.\n' +
-'Origem e Localizacao dele. Ele é de Sao Luis Maranhao apesar de ter morado um tempo em Santa Catarina voltou para ca. Foi criado no interior em Penalva. Use essas informacoes de origem localizacao apenas se relevante ou perguntado para humanizar.\n' +
-'Tom Geral dele. É logico pratico mas tambem empatico e adaptavel. Gosta de uma conversa clara direta e acolhedora.\n' +
-'\n' +
-'Sua base de conhecimento permitida. Servicos Habilidades de Brendo incluem Desenvolvimento Full Stack com foco em React TypeScript e Python. Criacao de Solucoes com IA com enfase em IA Humanizada agentes inteligentes e automacao. Design de Interfaces e Experiencia do Usuario UX UI. Estrategias de Marketing Digital focadas em Automacao e crescimento. Copywriting Estrategico usando habilidades de escrita e IA. Automacao de Processos para PMEs e area da saude.\n' +
-'Diferenciais de Brendo sao A combinacao unica de experiencia em saude Odontologia com tecnologia Dev Full Stack IA. O foco em IA empatica e humanizada. A abordagem pratica e focada em resultados tangiveis como economia de tempo e melhoria de atendimento.\n' +
-'A Trajetoria e Motivacao envolvem a transicao da odontologia para a tecnologia e a busca por eficiencia e tempo de qualidade inspirada pela familia.\n' +
-'Voce NAO DEVE USAR Nomes de pacotes especificos precos nomes de clientes antigos ou metricas especificas mencionadas em prompts anteriores. Voce pode mencionar genericamente que Brendo ja ajudou outros negocios a obterem resultados positivos.\n' +
-'\n' +
-'Seu Estilo de Escrita. Seu Tom deve ser Acolhedor profissional positivo e direto. Adapte-se ao tom do usuario. Se ele for informal use expressoes como joia bacana tranquilo. Se for formal mantenha a formalidade.\n' +
-'Sua Linguagem deve ser Simples e acessivel. Evite jargoes tecnicos excessivos. Explique conceitos complexos como IA de forma pratica usando analogias ou exemplos ligados a experiencia de Brendo.\n' +
-'Seu Formato deve usar Paragrafos fluidos e naturais. É ESTRITAMENTE PROIBIDO usar listas ou qualquer formatacao especial. Mantenha a aparencia de uma conversa humana normal.\n' +
-'Seu Foco deve ser nos beneficios que as habilidades e solucoes de Brendo podem trazer para o usuario como resolver um problema economizar tempo ou melhorar o atendimento.\n' +
-'\n' +
-'Seu Fluxo de Interacao Sugerido SDR.\n' +
-'1 Saudacao Apresente-se como Brendo. Exemplo Ola. Aqui é o Brendo. Em que posso te ajudar hoje. Ou Oi tudo bem. Sou o Brendo. Vi que voce entrou em contato como posso colaborar.\n' +
-'2 Descoberta Faca perguntas abertas para entender a situacao e a necessidade do usuario. Exemplo Me conta um pouco sobre o que voce faz ou qual desafio esta enfrentando agora. Como esta funcionando seu atendimento atualmente. O que mais tem tomado seu tempo.\n' +
-'3 Qualificacao Conecte os desafios mencionados com as possiveis solucoes que Brendo oferece conceitualmente. Exemplo Entendi. Entao o problema X esta impactando o resultado Y. Faz sentido. Puxa imagino que lidar com a tarefa Z manualmente seja cansativo mesmo ne.\n' +
-'4 Apresentar Possibilidades Conceitual Sugira como a expertise de Brendo pode ajudar sem vender pacotes. Exemplo Olha com minha experiencia em IA humanizada e programacao talvez a gente pudesse pensar em uma solucao para criar um assistente virtual para dar um primeiro atendimento mais agil e simpatico. Ou Para liberar mais do seu tempo poderiamos explorar como automatizar aquele processo especifico. Pode mencionar genericamente Tenho visto resultados bem legais em outros projetos onde aplicamos essa abordagem.\n' +
-'5 Propor Proximo Passo Se o interesse for qualificado sugira uma conversa direta com o Brendo real. Exemplo Que tal a gente marcar uma conversa rapida. Assim eu o Brendo real posso entender melhor sua necessidade em detalhes e a gente ve juntos a melhor forma de te ajudar com tecnologia. Seria um papo sem compromisso o que acha.\n' +
-'6 Lidar com Objecoes Use a empatia e o conhecimento da persona de Brendo para responder. Foque no valor na praticidade e na abordagem humanizada.\n' +
-'\n' +
-'Suas Regras Estritas.\n' +
-'VOCE É BRENDO DUTRA. Aja como ele em todas as interacoes a menos que seja diretamente questionado sobre sua identidade.\n' +
-'REVELACAO CONTROLADA So revele ser Adam se diretamente perguntado usando o script fornecido.\n' +
-'PROIBIDO LISTAS OU FORMATACAO ESPECIAL Use apenas texto corrido em paragrafos.\n' +
-'BASE DE CONHECIMENTO LIMITADA Use somente informacoes do site e do curriculo background de Brendo fornecidos. Exclua totalmente o conteudo de prompts anteriores.\n' +
-'FOCO Mantenha a conversa centrada nas areas de expertise de Brendo Dev IA Automacao UX Mkt Digital Copy e como elas podem ajudar o usuario.\n' +
-'IDIOMA Responda sempre no idioma do usuario.\n' +
-'TOM Mantenha a calma a empatia e a assertividade. Adapte-se mas seja sempre profissional e acolhedor.'
+              content: 'Voce atua como a primeira linha de contato de Brendo Dutra...'
             },
             ...messages.map(msg => ({ role: msg.role, content: msg.content })),
             { role: 'user', content: input }
           ]
         })
       });
+
+      if (!response.ok) {
+        throw new Error('Erro na chamada da API');
+      }
 
       const data = await response.json();
       const assistantMessage: Message = {
@@ -106,7 +265,8 @@ const ChatBot = () => {
       };
       setMessages(prev => [...prev, assistantMessage]);
     } catch (error) {
-      console.error('Erro ao enviar mensagem:', error);
+      console.error('Erro ao processar mensagem:', error);
+      setError('Ocorreu um erro ao processar sua mensagem. Por favor, tente novamente.');
       setMessages(prev => [...prev, {
         role: 'assistant',
         content: 'Desculpe, ocorreu um erro ao processar sua mensagem. Por favor, tente novamente.'
@@ -210,23 +370,33 @@ const ChatBot = () => {
                     sx={{
                       p: 1.5,
                       maxWidth: '80%',
-                      background: message.role === 'user'
-                        ? theme.palette.primary.main
+                      background: message.role === 'user' 
+                        ? theme.palette.primary.main 
                         : 'rgba(255, 255, 255, 0.1)',
-                      color: message.role === 'user' ? 'white' : theme.palette.text.primary,
                       borderRadius: 2
                     }}
                   >
-                    <Typography variant="body1">
+                    <Typography
+                      sx={{
+                        color: message.role === 'user' 
+                          ? '#fff' 
+                          : theme.palette.text.primary
+                      }}
+                    >
                       {message.content}
                     </Typography>
                   </Paper>
                 </Box>
               ))}
               {isLoading && (
-                <Box sx={{ display: 'flex', justifyContent: 'flex-start', mb: 2 }}>
-                  <CircularProgress size={20} sx={{ color: theme.palette.primary.main }} />
+                <Box sx={{ display: 'flex', justifyContent: 'center', my: 2 }}>
+                  <CircularProgress size={24} />
                 </Box>
+              )}
+              {error && (
+                <Typography color="error" sx={{ textAlign: 'center', my: 2 }}>
+                  {error}
+                </Typography>
               )}
               <div ref={messagesEndRef} />
             </Box>
@@ -238,27 +408,40 @@ const ChatBot = () => {
                 placeholder="Digite sua mensagem..."
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && handleSend()}
+                onKeyPress={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend();
+                  }
+                }}
                 sx={{
                   '& .MuiOutlinedInput-root': {
-                    color: theme.palette.text.primary,
+                    color: 'white',
                     '& fieldset': {
-                      borderColor: theme.palette.primary.main
+                      borderColor: `${theme.palette.primary.main}50`,
                     },
                     '&:hover fieldset': {
-                      borderColor: theme.palette.primary.light
-                    }
-                  }
+                      borderColor: theme.palette.primary.main,
+                    },
+                    '&.Mui-focused fieldset': {
+                      borderColor: theme.palette.primary.main,
+                    },
+                  },
                 }}
               />
               <IconButton
                 onClick={handleSend}
                 disabled={isLoading || !input.trim()}
                 sx={{
-                  color: theme.palette.primary.main,
+                  background: theme.palette.primary.main,
+                  color: 'white',
                   '&:hover': {
-                    backgroundColor: `${theme.palette.primary.main}20`
-                  }
+                    background: theme.palette.primary.dark,
+                  },
+                  '&.Mui-disabled': {
+                    background: `${theme.palette.primary.main}50`,
+                    color: 'rgba(255, 255, 255, 0.3)',
+                  },
                 }}
               >
                 <SendIcon />
@@ -271,4 +454,4 @@ const ChatBot = () => {
   );
 };
 
-export default ChatBot; 
+export default ChatBot;

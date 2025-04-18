@@ -9,7 +9,6 @@ import Terms from './pages/Terms';
 import Navbar from './components/Navbar';
 import Footer from './components/Footer';
 import CookieConsent from './components/CookieConsent';
-import ChatBot from './components/ChatBot';
 
 const theme = createTheme({
   palette: {
@@ -76,7 +75,6 @@ function App() {
           <Route path="/terms" element={<Terms />} />
         </Routes>
         <CookieConsent />
-        <ChatBot />
         <Footer />
       </Router>
     </ThemeProvider>
